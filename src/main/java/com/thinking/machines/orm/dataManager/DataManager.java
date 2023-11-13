@@ -1,0 +1,1599 @@
+package com.thinking.machines.orm.dataManager;
+import com.google.gson.*;
+import java.io.*;
+import java.sql.*;
+import java.lang.reflect.*;
+import java.lang.annotation.*;
+import java.util.*;
+import java.util.jar.*;
+import com.thinking.machines.orm.annotations.*;
+import com.thinking.machines.orm.pojo.*;
+import com.thinking.machines.orm.exceptions.*;
+import com.thinking.machines.orm.pojoCopier.*;
+public class DataManager
+{
+private static Connection connection;
+private static DataManager dataManager=null;
+private String queryString;
+private Class c;
+private List<Object> conditions;
+static private Map<String,TableInfo> ds;
+private static DBInfo dbInfo;
+private TableInfo queryTableInfo;
+private static Map<String,List<Object>> cacheMap;
+private List<String> cacheableTables;
+private boolean isCacheData;
+private String cacheTableName;
+private boolean isWhereApplied;
+private boolean isAndApplied;
+private boolean isOrApplied;
+private ColumnInfo conditionColumn;
+private List<Object> cacheData;
+private List<Object> dataToReturn;
+private DataManager() throws DataException
+{
+this.connection=null;
+this.queryString="";
+this.conditions=null;
+this.queryTableInfo=null;
+this.isCacheData=false;
+this.cacheTableName="";
+this.cacheableTables=new ArrayList<String>();
+this.cacheMap=new HashMap<String,List<Object>>();
+this.isWhereApplied=false;
+this.conditionColumn=null;
+this.cacheData=null;
+this.dataToReturn=null;
+populateDS();
+init();
+}
+private void populateDS() throws DataException
+{
+try
+{
+FileReader fileReader=new FileReader("conf.json");
+Gson gson=new Gson();
+dbInfo=gson.fromJson(fileReader,DBInfo.class);
+ds=new HashMap<String,TableInfo>();
+String jarFileName=dbInfo.jarName;
+File file=new File(jarFileName);
+if(!(file.exists()))
+{
+throw new DataException("Jar file "+jarFileName+" not found");
+}
+JarFile jarFile=new JarFile(file);
+Enumeration<JarEntry> jarEntries=jarFile.entries();
+JarEntry jarEntry;
+String className;
+Class c;
+Annotation an;
+String jarEntryName,tmp,tableName;
+int x,e,ep;
+Table table;
+View view;
+TableInfo tableInfo;
+Field []fields;
+Column column;
+ColumnInfo columnInfo,primaryKey;
+Method method;
+List<ColumnInfo> columnInfoList=new ArrayList<>();
+Method setter,getter;
+String setterName,getterName,fieldName;
+Class []parameters;
+ForeignKey foreignKey;
+List<ColumnInfo> foreignKeys;
+Map<String,List<ExportedKeyInfo>> exportedKeysMap;
+List<ExportedKeyInfo> exportedKeyList;
+ExportedKeyInfo exportedKeyInfo;
+DatabaseMetaData metaData;
+String add,update,delete,getAll;
+ResultSet resultSet;
+boolean isCacheable,isView;
+int count;
+List<String> columnsForAddString;
+Map<String,Method> methodsInfo;
+Class.forName(dbInfo.jdbcDriver);
+connection=DriverManager.getConnection(dbInfo.connectionUrl,dbInfo.userName,dbInfo.password);
+while(jarEntries.hasMoreElements())
+{
+jarEntry=jarEntries.nextElement();
+if(jarEntry.getName().endsWith(".class"))
+{
+isCacheable=false;
+jarEntryName=jarEntry.getName();
+x=jarEntryName.indexOf('.');
+tmp=jarEntryName.substring(0,x);
+className=tmp.replace('/','.');
+c=Class.forName(className);
+if(c.isAnnotationPresent(Table.class)==false && c.isAnnotationPresent(View.class)==false) continue;
+an=c.getAnnotation(Table.class);
+if(an!=null)
+{
+isView=false;
+table=(Table)an;
+tableName=table.name();
+}
+else
+{
+isView=true;
+an=c.getAnnotation(View.class);
+view=(View)an;
+tableName=view.name();
+}
+if(c.isAnnotationPresent(Cacheable.class))
+{
+this.cacheableTables.add(tableName);
+isCacheable=true;
+}
+
+fields=c.getDeclaredFields();
+columnInfoList=new ArrayList<ColumnInfo>();
+foreignKeys=new ArrayList<ColumnInfo>();
+primaryKey=null;
+columnsForAddString=new ArrayList<String>();
+add="";
+update="";
+delete="";
+count=0;
+if(!isView)
+{
+add="insert into "+tableName+"(";
+update="update student set ";
+}
+for(Field field:fields)
+{
+if(field.isAnnotationPresent(Column.class)==false) continue;
+an=field.getAnnotation(Column.class);
+column=(Column)an;
+fieldName=field.getName();
+tmp=fieldName.substring(0,1).toUpperCase()+fieldName.substring(1);
+setterName="set"+tmp;
+getterName="get"+tmp;
+parameters=new Class[1];
+parameters[0]=field.getType();
+setter=c.getMethod(setterName,parameters);
+getter=c.getMethod(getterName);
+columnInfo=new ColumnInfo();
+columnInfo.name=column.name();
+columnInfo.field=field;
+columnInfo.setter=setter;
+columnInfo.getter=getter;
+if(field.isAnnotationPresent(AutoIncrement.class)) columnInfo.isAutoIncrement=true;
+else
+{
+if(!isView)
+{
+add+=columnInfo.name+",";
+count++;
+}
+}
+if(field.isAnnotationPresent(ForeignKey.class))
+{
+an=field.getAnnotation(ForeignKey.class);
+foreignKey=(ForeignKey)an;
+columnInfo.isForeignKey=true;
+columnInfo.parentTable=foreignKey.parent();
+columnInfo.parentColumn=foreignKey.column();
+foreignKeys.add(columnInfo);
+}
+if(field.isAnnotationPresent(PrimaryKey.class))
+{
+columnInfo.isPrimaryKey=true;
+primaryKey=columnInfo;
+}
+else
+{
+update+=columnInfo.name+"=?,";
+}
+columnInfoList.add(columnInfo);
+} // loop on fields
+//insert into student(name,gender,course_code) values(?,?,?)
+if(!isView)
+{
+add=add.substring(0,add.length()-1);
+add+=") value(";
+for(e=1;e<=count;e++)
+{
+add=add+"?";
+if(e<count) add+=",";
+}
+add+=")";
+System.out.println("Add string : "+add);
+// update student set name=?,gender=?,date_of_birth=? where roll_number=?;
+update=update.substring(0,update.length()-1);
+update+=" where "+primaryKey.name+"=?";
+System.out.println("Update string : "+update);
+// delete from student where roll_number=?
+delete="delete from "+tableName+" where "+primaryKey.name+"=?";
+System.out.println("Delete string : "+delete);
+}
+tableInfo=new TableInfo();
+tableInfo.name=tableName;
+tableInfo.c=c;
+tableInfo.columnInfoList=columnInfoList;
+tableInfo.primaryKey=primaryKey;
+tableInfo.foreignKeys=foreignKeys;
+tableInfo.isCacheable=isCacheable;
+if(!isView) 
+{
+tableInfo.add=add;
+tableInfo.update=update;
+tableInfo.delete=delete;
+}
+metaData=connection.getMetaData();
+resultSet=metaData.getExportedKeys(null,null,tableName);
+exportedKeyList=new ArrayList<ExportedKeyInfo>();
+exportedKeysMap=new HashMap<String,List<ExportedKeyInfo>>();
+while(resultSet.next())
+{
+exportedKeyList=null;
+exportedKeyInfo=new ExportedKeyInfo();
+exportedKeyInfo.columnName=resultSet.getString("PKCOLUMN_NAME");
+exportedKeyList=exportedKeysMap.get(exportedKeyInfo.columnName);
+if(exportedKeyList==null) exportedKeyList=new ArrayList<ExportedKeyInfo>();
+exportedKeyInfo.fkTableName=resultSet.getString("FKTABLE_NAME");
+exportedKeyInfo.fkColumnName=resultSet.getString("FKCOLUMN_NAME");
+exportedKeyList.add(exportedKeyInfo);
+exportedKeysMap.put(exportedKeyInfo.columnName,exportedKeyList);
+}
+resultSet.close();
+tableInfo.exportedKeysMap=exportedKeysMap;
+ds.put(tableName,tableInfo);
+}
+} // loop on jar file
+connection.close();
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+}
+private void init() throws DataException
+{
+try
+{
+Class.forName(dbInfo.jdbcDriver);
+connection=DriverManager.getConnection(dbInfo.connectionUrl,dbInfo.userName,dbInfo.password);
+PreparedStatement preparedStatement;
+ResultSet resultSet;
+TableInfo tableInfo;
+Class tableClass,fieldClass;
+Object obj,value;
+List<Object> list;
+List<ColumnInfo> columnInfoList;
+Field field;
+java.sql.Date sqlDate;
+java.util.Date utilDate;
+Object arguments[];
+for(String tableName:this.cacheableTables)
+{
+tableInfo=ds.get(tableName);
+if(tableInfo==null)
+{
+// throw exception
+}
+tableClass=tableInfo.c;
+columnInfoList=tableInfo.columnInfoList;
+preparedStatement=connection.prepareStatement("select * from "+tableName);
+resultSet=preparedStatement.executeQuery();
+list=new ArrayList<Object>();
+while(resultSet.next())
+{
+obj=tableClass.newInstance();
+for(ColumnInfo ci:columnInfoList)
+{
+field=ci.field;
+fieldClass=field.getType();
+value=null;
+if(fieldClass==Integer.class || fieldClass==int.class)
+{
+value=resultSet.getInt(ci.name);
+}
+if(fieldClass==String.class)
+{
+value=resultSet.getString(ci.name);
+}
+if(fieldClass==java.util.Date.class)
+{
+sqlDate=resultSet.getDate(ci.name);
+utilDate=new java.util.Date(sqlDate.getYear(),sqlDate.getMonth(),sqlDate.getDate());
+value=utilDate;
+}
+arguments=new Object[1];
+arguments[0]=value;
+ci.setter.invoke(obj,value);
+} // loop for columnList
+list.add(obj);
+}
+resultSet.close();
+preparedStatement.close();
+cacheMap.put(tableName,list);
+} // loop on table
+connection.close();
+for(Map.Entry<String,List<Object>> entry:cacheMap.entrySet())
+{
+System.out.println("Cache Table name : "+entry.getKey());
+}
+}catch(Exception exception)
+{
+System.out.println(exception);
+throw new DataException(exception.getMessage());
+}
+}
+public static DataManager getDataManager() throws DataException
+{
+if(dataManager==null) dataManager=new DataManager();
+return dataManager;
+}
+public void begin() throws DataException
+{
+try
+{
+Class.forName(dbInfo.jdbcDriver);
+connection=DriverManager.getConnection(dbInfo.connectionUrl,dbInfo.userName,dbInfo.password);
+connection.setAutoCommit(false);
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+}
+public void end() throws DataException
+{
+try
+{
+connection.commit();
+connection.close();
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+}
+public int save(Object obj) throws DataException
+{
+if(connection==null) throw new DataException("Connection is not established");
+try
+{
+Class c=obj.getClass();
+boolean isTable=c.isAnnotationPresent(Table.class);
+if(!(isTable)) throw new DataException("Specified object does not represent any table");
+Annotation an;
+an=c.getAnnotation(Table.class);
+Table table=(Table)an;
+String tableName=table.name();
+TableInfo tableInfo=ds.get(tableName);
+if(tableInfo==null) throw new DataException("Specified object does not represent any table");
+Column column;
+int generatedKeys=0;
+List<ColumnInfo> columnInfoList=tableInfo.columnInfoList;
+ColumnInfo columnInfo;
+ForeignKey foreignKey;
+String str;
+int i=0;
+int count=0;
+List<ColumnInfo> foreignKeys=tableInfo.foreignKeys;
+Object value;
+PreparedStatement preparedStatement;
+ResultSet resultSet;
+for(ColumnInfo ci:foreignKeys)
+{
+value=ci.getter.invoke(obj);
+preparedStatement=connection.prepareStatement("select * from "+ci.parentTable+" where "+ci.parentColumn+"=?");
+if(value instanceof Integer) 
+{
+preparedStatement.setInt(1,(Integer)value);
+}
+// some more if conditions for other classes
+resultSet=preparedStatement.executeQuery();
+if(resultSet.next()==false)
+{
+resultSet.close();
+preparedStatement.close();
+throw new DataException("Invalid "+ci.field.getName()+" : "+value);
+}
+resultSet.close();
+preparedStatement.close();
+}
+String statement=tableInfo.add;
+preparedStatement=connection.prepareStatement(statement,Statement.RETURN_GENERATED_KEYS);
+String getterName;
+String tmp;
+Method getter;
+int e=1;
+ColumnInfo autoIncrement=null;
+for(ColumnInfo ci:columnInfoList)
+{
+if(ci.isAutoIncrement) 
+{
+autoIncrement=ci;
+continue;
+}
+value=ci.getter.invoke(obj);
+if(value instanceof String)
+{
+preparedStatement.setString(e,(String)value);
+//System.out.println(value+" is String");
+}
+if(value instanceof Integer)
+{
+preparedStatement.setInt(e,(Integer)value);
+}
+if(value instanceof java.util.Date)
+{
+java.util.Date utilDate=(java.util.Date)value;
+java.sql.Date sqlDate=new java.sql.Date(utilDate.getYear(),utilDate.getMonth(),utilDate.getDate());
+preparedStatement.setDate(e,sqlDate);
+}
+if(value instanceof Boolean)
+{
+preparedStatement.setBoolean(e,(Boolean)value);
+}
+//preparedStatement.setString(e,value);
+e++;
+}
+try
+{
+preparedStatement.executeUpdate();
+}catch(SQLException sqlException)
+{
+preparedStatement.close();
+connection.rollback();
+throw new DataException(sqlException.getMessage());
+}
+resultSet=preparedStatement.getGeneratedKeys();
+if(resultSet.next())
+{
+generatedKeys=resultSet.getInt(1);
+}
+resultSet.close();
+preparedStatement.close();
+if(tableInfo.isCacheable)
+{
+List<Object> list=cacheMap.get(tableName);
+if(list==null) list=new ArrayList<Object>();
+Object arguments[]=new Object[1];
+arguments[0]=generatedKeys;
+autoIncrement.setter.invoke(obj,arguments);
+Object target=c.newInstance();
+PojoCopier.copy(target,obj);
+list.add(obj);
+cacheMap.put(tableName,list);
+}
+
+return generatedKeys;
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+}
+public void update(Object obj) throws DataException
+{
+try
+{
+Class c=obj.getClass();
+boolean isTable=c.isAnnotationPresent(Table.class);
+if(!(isTable)) throw new DataException("Specified object does not represent any table");
+Column column;
+Annotation an;
+int code=0;
+ColumnInfo columnInfo;
+ForeignKey foreignKey;
+String str;
+an=c.getAnnotation(Table.class);
+Table table=(Table)an;
+String tableName=table.name();
+TableInfo tableInfo=ds.get(tableName);
+if(tableInfo==null) throw new DataException("Specified object does not represent any table");;
+List<ColumnInfo> columnInfoList=tableInfo.columnInfoList;
+String primaryKeyName="";
+ResultSet resultSet;
+Object primaryKeyValue=null;
+PreparedStatement preparedStatement;
+ColumnInfo primaryKey=tableInfo.primaryKey;
+primaryKeyValue=primaryKey.getter.invoke(obj);
+preparedStatement=connection.prepareStatement("select * from "+tableName+" where "+primaryKey.name+"=?");
+if(primaryKeyValue instanceof Integer)
+{
+preparedStatement.setInt(1,(Integer)primaryKeyValue);
+}
+resultSet=preparedStatement.executeQuery();
+if(resultSet.next()==false)
+{
+resultSet.close();
+preparedStatement.close();
+throw new DataException("Invalid "+primaryKey.field.getName()+" : "+primaryKeyValue);
+}
+resultSet.close();
+preparedStatement.close();
+List<ColumnInfo> foreignKeys=tableInfo.foreignKeys;
+Object value;
+
+for(ColumnInfo ci:foreignKeys)
+{
+value=ci.getter.invoke(obj);
+preparedStatement=connection.prepareStatement("select * from "+ci.parentTable+" where "+ci.parentColumn+"=?");
+if(value instanceof Integer) 
+{
+preparedStatement.setInt(1,(Integer)value);
+}
+// some more if conditions for other classes
+resultSet=preparedStatement.executeQuery();
+if(resultSet.next()==false)
+{
+resultSet.close();
+preparedStatement.close();
+throw new DataException("Invalid "+ci.field.getName()+" : "+value);
+}
+resultSet.close();
+preparedStatement.close();
+}
+String statement=tableInfo.update;
+System.out.println("Statement : "+statement);
+preparedStatement=connection.prepareStatement(statement);
+int e=1;
+for(ColumnInfo ci:columnInfoList)
+{
+if(ci.isPrimaryKey)
+{
+continue;
+}
+value=ci.getter.invoke(obj);
+if(value instanceof String)
+{
+preparedStatement.setString(e,(String)value);
+//System.out.println(value+" is String");
+}
+if(value instanceof Integer)
+{
+preparedStatement.setInt(e,(Integer)value);
+}
+if(value instanceof java.util.Date)
+{
+java.util.Date utilDate=(java.util.Date)value;
+java.sql.Date sqlDate=new java.sql.Date(utilDate.getYear(),utilDate.getMonth(),utilDate.getDate());
+preparedStatement.setDate(e,sqlDate);
+}
+if(value instanceof Boolean)
+{
+preparedStatement.setBoolean(e,(Boolean)value);
+}
+//preparedStatement.setString(e,value);
+e++;
+}
+if(primaryKeyValue instanceof Integer)
+{
+preparedStatement.setInt(columnInfoList.size(),(Integer)primaryKeyValue);
+}
+
+try
+{
+preparedStatement.executeUpdate();
+}catch(SQLException sqlException)
+{
+preparedStatement.close();
+connection.rollback();
+throw new DataException(sqlException.getMessage());
+}
+preparedStatement.close();
+if(tableInfo.isCacheable)
+{
+List<Object> list=cacheMap.get(tableName);
+if(list==null)
+{
+// throw exception
+}
+Object o,val;
+int index=0;
+for(e=0;e<list.size();e++)
+{
+o=list.get(e);
+val=primaryKey.getter.invoke(o);
+if(compareValues(o,primaryKeyValue))
+{
+index=e;
+break;
+}
+}
+list.remove(index);
+Object target=c.newInstance();
+PojoCopier.copy(target,obj);
+list.add(target);
+cacheMap.put(tableName,list);
+}
+
+
+
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+}
+public void delete(Class c,Object value) throws DataException
+{
+try
+{
+boolean isTable=c.isAnnotationPresent(Table.class);
+if(!(isTable)) throw new DataException("Specified object does not represent any table");
+Column column;
+Annotation an;
+int code=0;
+List<ColumnInfo> columnInfoList=new ArrayList<ColumnInfo>();
+ColumnInfo columnInfo;
+ForeignKey foreignKey;
+String str;
+PreparedStatement preparedStatement;
+ResultSet resultSet;
+DatabaseMetaData metaData;
+String foreignKeyTableName;
+String foreignKeyColumnName;
+String columnName;
+an=c.getAnnotation(Table.class);
+Table table=(Table)an;
+String tableName=table.name();
+TableInfo tableInfo=ds.get(tableName);
+List<ExportedKeyInfo> exportedKeysList;
+if(tableInfo==null) throw new DataException("Specified object does not represent any table");
+ColumnInfo primaryKey=tableInfo.primaryKey;
+
+if(!(compareClasses(value.getClass(),primaryKey.field.getType()))) throw new DataException("Argument type mismatch for "+primaryKey.name+" required : "+primaryKey.field.getType()+", found : "+value.getClass());
+preparedStatement=connection.prepareStatement("select * from "+tableName+" where "+primaryKey.name+"=?");
+if(value instanceof Integer)
+{
+preparedStatement.setInt(1,(Integer)value);
+}
+
+// some more if conditions for other data types
+
+resultSet=preparedStatement.executeQuery();
+if(resultSet.next()==false)
+{
+resultSet.close();
+preparedStatement.close();
+throw new DataException("Invalid "+primaryKey.field.getName()+" : "+value);
+}
+resultSet.close();
+preparedStatement.close();
+Object key;
+Map<String,List<ExportedKeyInfo>> exportedKeysMap=tableInfo.exportedKeysMap;
+for(Map.Entry<String,List<ExportedKeyInfo>> entry:exportedKeysMap.entrySet())
+{
+columnName=entry.getKey();
+preparedStatement=connection.prepareStatement("select "+columnName+" from "+tableName+" where "+primaryKey.name+"=?");
+if(value instanceof Integer)
+{
+preparedStatement.setInt(1,(Integer)value);
+}
+// some more if conditions for other data types
+resultSet=preparedStatement.executeQuery();
+resultSet.next();
+key=resultSet.getObject(columnName);
+resultSet.close();
+preparedStatement.close();
+exportedKeysList=entry.getValue();
+
+for(ExportedKeyInfo ek:exportedKeysList)
+{
+preparedStatement=connection.prepareStatement("select * from "+ek.fkTableName+" where "+ek.fkColumnName+"=?");
+preparedStatement.setObject(1,key);
+resultSet=preparedStatement.executeQuery();
+if(resultSet.next())
+{
+resultSet.close();
+preparedStatement.close();
+throw new DataException("Cannot delete "+tableName+" with "+ek.columnName+" : "+key+" as it is allocated to "+ek.fkTableName);
+}
+resultSet.close();
+preparedStatement.close();
+
+} // loop on list
+
+} // loop on map(exported keys)
+preparedStatement=connection.prepareStatement(tableInfo.delete);
+if(value instanceof Integer)
+{
+preparedStatement.setInt(1,(Integer)value);
+}
+try
+{
+preparedStatement.executeUpdate();
+}catch(SQLException sqlException)
+{
+preparedStatement.close();
+connection.rollback();
+throw new DataException(sqlException.getMessage());
+}
+preparedStatement.close();
+if(tableInfo.isCacheable)
+{
+List<Object> list=cacheMap.get(tableName);
+if(list==null)
+{
+// throw exception
+}
+Object o,val;
+int index=0;
+for(int e=0;e<list.size();e++)
+{
+o=list.get(e);
+val=primaryKey.getter.invoke(o);
+if(compareValues(o,value))
+{
+index=e;
+break;
+}
+}
+list.remove(index);
+cacheMap.put(tableName,list);
+}
+
+
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+}
+
+public DataManager query(Class c) throws DataException
+{
+try
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(c==null) throw new DataException("Class reference is required");
+if(c.isAnnotationPresent(Table.class)==false && c.isAnnotationPresent(View.class)==false) 
+{
+throw new DataException("Specified class does not represent a table");
+}
+
+Annotation an=c.getAnnotation(Table.class);
+Table table;
+View view;
+String tableName;
+List<Object> list;
+if(an!=null)
+{
+table=(Table)an;
+tableName=table.name();
+}
+else
+{
+an=c.getAnnotation(View.class);
+view=(View)an;
+tableName=view.name();
+}
+if(c.isAnnotationPresent(Cacheable.class))
+{
+this.isCacheData=true;
+this.queryTableInfo=ds.get(tableName);
+list=cacheMap.get(tableName);
+if(list==null)
+{
+// throw exception
+}
+this.cacheData=new ArrayList<Object>();
+Object target;
+for(Object source:list)
+{
+target=c.newInstance();
+PojoCopier.copy(target,source);
+this.cacheData.add(target);
+}
+
+}
+else
+{
+this.isCacheData=false;
+this.cacheTableName="";
+this.queryTableInfo=ds.get(tableName);
+this.queryString="select * from "+tableName+" ";
+}
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+return this;
+}
+public DataManager where(String clause) throws DataException
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(this.queryTableInfo==null) throw new DataException("Class reference is required");
+if(isCacheData)
+{
+if(this.cacheData==null) 
+{
+// throw exception
+}
+this.isWhereApplied=true;
+for(ColumnInfo ci:this.queryTableInfo.columnInfoList)
+{
+if(ci.name.equalsIgnoreCase(clause))
+{
+this.conditionColumn=ci;
+break;
+}
+}
+try
+{
+Object value;
+for(Object obj:this.cacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value from this.cacheData : "+value);
+}
+}catch(Exception exception)
+{
+System.out.println(exception);
+}
+this.dataToReturn=this.cacheData;
+}
+else
+{
+if(this.queryString.length()==0) throw new DataException("Invalid query");
+this.queryString+="where "+clause;
+}
+return this;
+}
+public DataManager gt(int num) throws DataException
+{
+try
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(this.queryTableInfo==null) throw new DataException("Class reference is required");
+List<Object> newCacheData=new ArrayList<Object>();
+List<Object> oldCacheData=null;
+ColumnInfo primaryKey=this.queryTableInfo.primaryKey;
+if(this.dataToReturn==null) this.dataToReturn=new ArrayList<Object>();
+if(oldCacheData==null)
+{
+// throw exception
+}
+if(isCacheData)
+{
+Object value,val,i;
+boolean found;
+if(isWhereApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value>num)
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isWhereApplied=false;
+}// if condition for where clause
+if(isAndApplied)
+{
+oldCacheData=this.dataToReturn;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value>num)
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isAndApplied=false;
+}
+if(isOrApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value>num)
+{
+found=false;
+i=primaryKey.getter.invoke(obj);
+for(Object o:this.dataToReturn)
+{
+val=primaryKey.getter.invoke(o);
+System.out.println("Val : "+val);
+if(compareValues(i,val)) 
+{
+found=true;
+break;
+}
+}
+System.out.println("Found : "+found);
+if(found==false) this.dataToReturn.add(obj);
+
+}
+}
+this.isOrApplied=false;
+}
+for(Object obj:this.dataToReturn)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value from gt this.dataToReturn : "+value);
+}
+}
+else
+{
+if(this.queryString.length()==0) throw new DataException("Invalid query");
+this.queryString+=">?";
+if(this.conditions==null) conditions=new ArrayList<Object>();
+this.conditions.add(num);
+}
+
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+
+
+return this;
+}
+public DataManager lt(int num) throws DataException
+{
+try
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(this.queryTableInfo==null) throw new DataException("Class reference is required");
+List<Object> newCacheData=new ArrayList<Object>();
+List<Object> oldCacheData=null;
+ColumnInfo primaryKey=this.queryTableInfo.primaryKey;
+if(this.dataToReturn==null) this.dataToReturn=new ArrayList<Object>();
+if(isCacheData)
+{
+Object value,val,i;
+boolean found;
+if(isWhereApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value<num)
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isWhereApplied=false;
+}// if condition for where clause
+if(isAndApplied)
+{
+oldCacheData=this.dataToReturn;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value<num)
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isAndApplied=false;
+}
+if(isOrApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value<num)
+{
+found=false;
+i=primaryKey.getter.invoke(obj);
+for(Object o:this.cacheData)
+{
+val=primaryKey.getter.invoke(o);
+System.out.println("Val : "+val);
+if(compareValues(i,val)) 
+{
+found=true;
+break;
+}
+}
+System.out.println("Found : "+found);
+if(found==false) this.dataToReturn.add(obj);
+}
+}
+this.isOrApplied=false;
+}
+for(Object obj:this.dataToReturn)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value from lt this.dataToReturn : "+value);
+}
+
+}
+else
+{
+if(this.queryString.length()==0) throw new DataException("Invalid query");
+this.queryString+="<?";
+if(this.conditions==null) conditions=new ArrayList<Object>();
+this.conditions.add(num);
+}
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+return this;
+}
+public DataManager ge(int num) throws DataException
+{
+try
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(this.queryTableInfo==null) throw new DataException("Class reference is required");
+List<Object> newCacheData=new ArrayList<Object>();
+List<Object> oldCacheData=null;
+ColumnInfo primaryKey=this.queryTableInfo.primaryKey;
+if(this.dataToReturn==null) this.dataToReturn=new ArrayList<Object>();
+if(oldCacheData==null)
+{
+// throw exception
+}
+if(isCacheData)
+{
+Object value,val,i;
+boolean found;
+if(isWhereApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value>=num)
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isWhereApplied=false;
+}// if condition for where clause
+if(isAndApplied)
+{
+oldCacheData=this.dataToReturn;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value>num)
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isAndApplied=false;
+}
+if(isOrApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value>num)
+{
+found=false;
+i=primaryKey.getter.invoke(obj);
+for(Object o:this.dataToReturn)
+{
+val=primaryKey.getter.invoke(o);
+System.out.println("Val : "+val);
+if(compareValues(i,val)) 
+{
+found=true;
+break;
+}
+}
+System.out.println("Found : "+found);
+if(found==false) this.dataToReturn.add(obj);
+
+}
+}
+this.isOrApplied=false;
+}
+for(Object obj:this.dataToReturn)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value from ge this.dataToReturn : "+value);
+}
+}
+
+else
+{
+if(this.queryString.length()==0) throw new DataException("Invalid query");
+this.queryString+=">=?";
+if(this.conditions==null) conditions=new ArrayList<Object>();
+this.conditions.add(num);
+}
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+return this;
+}
+public DataManager le(int num) throws DataException
+{
+try
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(this.queryTableInfo==null) throw new DataException("Class reference is required");
+List<Object> newCacheData=new ArrayList<Object>();
+List<Object> oldCacheData=null;
+ColumnInfo primaryKey=this.queryTableInfo.primaryKey;
+if(this.dataToReturn==null) this.dataToReturn=new ArrayList<Object>();
+if(oldCacheData==null)
+{
+// throw exception
+}
+if(isCacheData)
+{
+Object value,val,i;
+boolean found;
+if(isWhereApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value<=num)
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isWhereApplied=false;
+}// if condition for where clause
+if(isAndApplied)
+{
+oldCacheData=this.dataToReturn;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value<=num)
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isAndApplied=false;
+}
+if(isOrApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if((int)value<=num)
+{
+found=false;
+i=primaryKey.getter.invoke(obj);
+for(Object o:this.dataToReturn)
+{
+val=primaryKey.getter.invoke(o);
+System.out.println("Val : "+val);
+if(compareValues(i,val)) 
+{
+found=true;
+break;
+}
+}
+System.out.println("Found : "+found);
+if(found==false) this.dataToReturn.add(obj);
+
+}
+}
+this.isOrApplied=false;
+}
+for(Object obj:this.dataToReturn)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value from le this.dataToReturn : "+value);
+}
+}
+else
+{
+if(this.queryString.length()==0) throw new DataException("Invalid query");
+this.queryString+="<=?";
+if(this.conditions==null) conditions=new ArrayList<Object>();
+this.conditions.add(num);
+}
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+return this;
+}
+public DataManager eq(Object val) throws DataException
+{
+try
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(this.queryTableInfo==null) throw new DataException("Class reference is required");
+List<Object> newCacheData=new ArrayList<Object>();
+List<Object> oldCacheData=null;
+ColumnInfo primaryKey=this.queryTableInfo.primaryKey;
+if(this.dataToReturn==null) this.dataToReturn=new ArrayList<Object>();
+if(oldCacheData==null)
+{
+// throw exception
+}
+if(isCacheData)
+{
+Object value,v,i;
+Class valClass=val.getClass();
+Class fieldClass=this.conditionColumn.field.getType();
+if(compareClasses(valClass,fieldClass)==false)
+{
+System.out.println("Val class : "+valClass);
+System.out.println("Field class : "+fieldClass);
+throw new DataException("Argument types does not match for : "+this.conditionColumn.name);
+}
+boolean found;
+if(isWhereApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+System.out.println(compareValues(value,val));
+if(compareValues(value,val))
+{
+System.out.println("Value : "+value);
+System.out.println("Val : "+val);
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isWhereApplied=false;
+}// if condition for where clause
+if(isAndApplied)
+{
+for(Object obj:this.dataToReturn)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if(compareValues(value,val))
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isAndApplied=false;
+}
+if(isOrApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if(compareValues(value,val))
+{
+found=false;
+i=primaryKey.getter.invoke(obj);
+for(Object o:this.dataToReturn)
+{
+v=primaryKey.getter.invoke(o);
+System.out.println("V : "+v);
+if(compareValues(i,v)) 
+{
+found=true;
+break;
+}
+}
+System.out.println("Found : "+found);
+if(found==false) this.dataToReturn.add(obj);
+}
+}
+this.isOrApplied=false;
+}
+for(Object obj:this.dataToReturn)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value from eq this.dataToReturn : "+value);
+}
+}
+else
+{
+if(this.queryString.length()==0) throw new DataException("Invalid query");
+this.queryString+="=?";
+if(this.conditions==null) conditions=new ArrayList<Object>();
+this.conditions.add(val);
+}
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+return this;
+}
+
+public DataManager ne(Object val) throws DataException
+{
+try
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(this.queryTableInfo==null) throw new DataException("Class reference is required");
+List<Object> newCacheData=new ArrayList<Object>();
+List<Object> oldCacheData=null;
+ColumnInfo primaryKey=this.queryTableInfo.primaryKey;
+if(this.dataToReturn==null) this.dataToReturn=new ArrayList<Object>();
+if(oldCacheData==null)
+{
+// throw exception
+}
+if(isCacheData)
+{
+Object value,v,i;
+boolean found;
+if(isWhereApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if(!(compareValues(value,val)))
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isWhereApplied=false;
+}// if condition for where clause
+if(isAndApplied)
+{
+oldCacheData=this.dataToReturn;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if(!(compareValues(value,val)))
+{
+newCacheData.add(obj);
+}
+}
+this.dataToReturn=newCacheData;
+this.isAndApplied=false;
+}
+if(isOrApplied)
+{
+oldCacheData=this.cacheData;
+for(Object obj:oldCacheData)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value : "+value);
+if(!(compareValues(value,val)))
+{
+found=false;
+i=primaryKey.getter.invoke(obj);
+for(Object o:this.dataToReturn)
+{
+v=primaryKey.getter.invoke(o);
+System.out.println("V : "+v);
+if(compareValues(i,v)) 
+{
+found=true;
+break;
+}
+}
+System.out.println("Found : "+found);
+if(found==false) this.dataToReturn.add(obj);
+}
+}
+this.isOrApplied=false;
+}
+for(Object obj:this.dataToReturn)
+{
+value=this.conditionColumn.getter.invoke(obj);
+System.out.println("Value from ne this.dataToReturn : "+value);
+}
+}
+else
+{
+if(this.queryString.length()==0) throw new DataException("Invalid query");
+this.queryString+="<>";
+if(this.conditions==null) conditions=new ArrayList<Object>();
+this.conditions.add(val);
+}
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+return this;
+}
+
+public DataManager and(String clause) throws DataException
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(this.queryTableInfo==null) throw new DataException("Class reference is required");
+if(isCacheData)
+{
+if(this.cacheData==null) 
+{
+// throw exception
+}
+this.isAndApplied=true;
+for(ColumnInfo ci:this.queryTableInfo.columnInfoList)
+{
+if(ci.name.equalsIgnoreCase(clause))
+{
+this.conditionColumn=ci;
+break;
+}
+}
+System.out.println("Condition column name : "+this.conditionColumn.name);
+
+}
+else
+{
+if(this.queryString.length()==0) throw new DataException("Invalid query");
+this.queryString+=" and "+clause;
+}
+return this;
+}
+public DataManager or(String clause) throws DataException
+{
+if(connection==null) throw new DataException("Connection is not established");
+if(this.queryTableInfo==null) throw new DataException("Class reference is required");
+if(isCacheData)
+{
+if(this.cacheData==null) 
+{
+// throw exception
+}
+this.isOrApplied=true;
+for(ColumnInfo ci:this.queryTableInfo.columnInfoList)
+{
+if(ci.name.equalsIgnoreCase(clause))
+{
+this.conditionColumn=ci;
+break;
+}
+}
+
+}
+else
+{
+if(this.queryString.length()==0) throw new DataException("Invalid query");
+this.queryString+=" or "+clause;
+}
+return this;
+}
+public Object fire() throws DataException
+{
+List list=new LinkedList<>();
+if(connection==null) throw new DataException("Connection is not established");
+if(isCacheData)
+{
+System.out.println("Is cache data");
+list=this.dataToReturn;
+this.dataToReturn=null;
+this.cacheData=null;
+}// if condition for isCacheData
+else
+{
+try
+{
+System.out.println("Not cache data");
+System.out.println("Query string : "+this.queryString);
+if(this.queryString==null || this.queryString.length()==0) throw new DataException("Create query to fire sql statement");
+PreparedStatement preparedStatement;
+preparedStatement=connection.prepareStatement(this.queryString);
+if(this.conditions!=null)
+{
+int e=1;
+for(Object value:this.conditions)
+{
+if(value instanceof Integer)
+{
+preparedStatement.setInt(e,(Integer)value);
+}
+if(value instanceof String)
+{
+preparedStatement.setString(e,(String)value);
+}
+e++;
+}
+}
+// done done
+ResultSet resultSet;
+resultSet=preparedStatement.executeQuery();
+Object obj;
+Column column;
+String fieldName;
+String tmp;
+String setterName;
+Method method;
+Class parameters[];
+Object arguments[];
+Annotation an;
+Object value=null;
+String tableColumnName;
+Class fieldClass;
+List<ColumnInfo> columnInfoList=this.queryTableInfo.columnInfoList;
+Field field;
+while(resultSet.next())
+{
+obj=this.queryTableInfo.c.newInstance();
+for(ColumnInfo ci:columnInfoList)
+{
+field=ci.field;
+fieldClass=field.getType();
+if(fieldClass==Integer.class || fieldClass==int.class)
+{
+value=resultSet.getInt(ci.name);
+}
+if(fieldClass==String.class)
+{
+value=resultSet.getString(ci.name);
+}
+if(fieldClass==java.util.Date.class)
+{
+java.sql.Date sqlDate=resultSet.getDate(ci.name);
+java.util.Date utilDate=new java.util.Date(sqlDate.getYear(),sqlDate.getMonth(),sqlDate.getDate());
+value=utilDate;
+}
+arguments=new Object[1];
+arguments[0]=value;
+try
+{
+ci.setter.invoke(obj,value);
+}catch(InvocationTargetException ite)
+{
+resultSet.close();
+System.out.println("ite.getCause() : "+ite.getCause());
+throw new DataException(ite.getCause().getMessage());
+}
+} // loop for columnList
+list.add(obj);
+}// loop for resultSet
+resultSet.close();
+preparedStatement.close();
+this.queryString="";
+this.queryTableInfo=null;
+this.conditions=null;
+this.conditionColumn=null;
+}catch(Exception exception)
+{
+throw new DataException(exception.getMessage());
+}
+}
+return list;
+}
+private boolean compareValues(Object left,Object right)
+{
+if(left.getClass()==int.class || left.getClass()==Integer.class)
+{
+return (int)left==(int)right;
+}
+else if(left.getClass()==String.class)
+{
+String l=(String)left;
+String r=(String)right;
+return l.equals(r);
+}
+return false;
+}
+public boolean compareClasses(Class left,Class right)
+{
+if(left.isPrimitive())
+{
+if(left==int.class) left=Integer.class;
+// more if conditions
+}
+if(right.isPrimitive())
+{
+if(right==int.class) right=Integer.class;
+}
+return left==right;
+
+}
+}

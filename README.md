@@ -42,7 +42,7 @@ You need to specify the names of tables that you want to be cacheable in 'conf.j
 ```
 The framework will maintain an in memory datastructure for this tables.
 
-## CURD Operations
+## CRUD Operations
 
 ### DataManager
 

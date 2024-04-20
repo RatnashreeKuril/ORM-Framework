@@ -40,21 +40,21 @@ You need to specify the names of tables that you want to be cacheable in 'conf.j
 }
 
 ```
-The framework will maintain an in memory datastructure for this tables.
+The framework will maintain an in memory datastructure for these tables.
 
 ## CRUD Operations
 
 ### DataManager
 
-To get the object of this class one needs to call the static method
+To obtain an object of this class, one needs to call the static method
 
 `public static DataManager getDataManager() throws DataException`
 
-of DataManager class. This will return an object of DataManager class.
+This method is part of the DataManager class and will return an object of DataManager class.
 
-This framework provides the functionality to perform basic CURD operations in database without writing a single line of sql.
+This framework provides functionality for performing basic CRUD operations in the database without writing a single line of SQL.
 
-Refer the following code snippets to get a glimpse of how this framework works.
+Refer to the following code snippets to get a glimpse of how this framework works:
 
 1. **Add**
 ```
@@ -205,15 +205,15 @@ dm.end();
 }
 
 ```
-**Note :** Place a call to *fire()* for firing the query.
+**Note :** Call the fire() method to execute the query.
 
 ### Applying where clause :
 
-**where(String column_name) :** This function takes the column name as argument. Use this function for applying where clause.
+**where(String column_name) :** Pass the column name as an argument to this function. Utilize this function to apply the WHERE clause.
 
 `List<School> schools=(List<School>)dm.query(School.class).where(“reg_no”).eq(12).fire();`
 
-This process is known as method chaining where we call multiple methods one after other on the same object. Use this technique for applying conditions on the query.
+This process is known as method chaining, where we call multiple methods one after another on the same object. Utilize this technique to apply conditions to the query.
 
 **eq(int num) :** equal to
 
